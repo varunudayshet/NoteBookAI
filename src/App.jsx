@@ -912,6 +912,7 @@ export default function NotebookLM() {
         role: "assistant",
         content: data.answer,
         retrievedChunks: data.chunks.map(c => ({ chunk: c })),
+        usedFallback: data.usedFallback,
         id: Date.now() + 1
       };
       setMessages(prev => [...prev, assistantMsg]);
@@ -1074,6 +1075,11 @@ export default function NotebookLM() {
                         <span key={i}>{line}{i < msg.content.split("\n").length - 1 && <br/>}</span>
                       ))}
                     </div>
+                    {msg.usedFallback && (
+                      <div className="msg-chunks">
+                        <span className="chunk-badge" style={{marginTop: 8, display: 'inline-block'}}>🌐 Wikipedia Fallback Used</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               )

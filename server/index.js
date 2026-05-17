@@ -5,7 +5,7 @@ import cors from 'cors';
 import multer from 'multer';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import dotenv from 'dotenv';
 import { Document } from '@langchain/core/documents';
 
@@ -56,8 +56,20 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     let text = "";
     if (req.file.mimetype === 'application/pdf') {
       const dataBuffer = fs.readFileSync(req.file.path);
-      const pdfData = await pdfParse(dataBuffer);
-      text = pdfData.text;
+      const uint8Array = new Uint8Array(dataBuffer);
+      const loadingTask = pdfjsLib.getDocument({ 
+        data: uint8Array,
+        standardFontDataUrl: 'node_modules/pdfjs-dist/standard_fonts/'
+      });
+      const pdfDocument = await loadingTask.promise;
+      let fullText = "";
+      for (let i = 1; i <= pdfDocument.numPages; i++) {
+        const page = await pdfDocument.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items.map(item => item.str).join(' ');
+        fullText += pageText + "\n";
+      }
+      text = fullText;
     } else {
       text = fs.readFileSync(req.file.path, 'utf8');
     }
@@ -90,6 +102,63 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
+// CRAG Evaluator Helper
+async function evaluateDocuments(query, docs) {
+  const gradedDocs = [];
+  const prompt = `You are a grader assessing relevance of retrieved documents to a user question.
+Here is the user question: "${query}"
+
+Here are the retrieved documents:
+${docs.map((d, i) => `[Document ${i}]:\n${d.pageContent}`).join("\n\n")}
+
+If a document contains keywords, semantic meaning, or facts related to the question, grade it as relevant.
+Return ONLY a valid JSON array containing the indices of the relevant documents. For example, if Document 0 and 2 are relevant, return [0, 2]. If none are relevant, return []. DO NOT return any markdown, just the array.`;
+
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "nvidia/nemotron-3-super-120b-a12b:free",
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    const data = await response.json();
+    if (data.choices && data.choices.length > 0) {
+      let content = data.choices[0].message.content.trim();
+      content = content.replace(/^```json/i, "").replace(/```$/i, "").trim();
+      
+      const relevantIndices = JSON.parse(content);
+      if (Array.isArray(relevantIndices)) {
+        relevantIndices.forEach(idx => {
+          if (docs[idx]) gradedDocs.push(docs[idx]);
+        });
+        return gradedDocs;
+      }
+    }
+  } catch (error) {
+    console.error("Grading error:", error);
+  }
+  return docs; // fallback to all docs if evaluation fails
+}
+
+// CRAG Wikipedia Fallback Helper
+async function fallbackSearch(query) {
+  try {
+    const response = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json`);
+    const data = await response.json();
+    if (data.query && data.query.search && data.query.search.length > 0) {
+      return data.query.search.slice(0, 3).map(res => res.snippet.replace(/<\/?[^>]+(>|$)/g, "")).join("\n\n");
+    }
+  } catch (error) {
+    console.error("Wikipedia search error:", error);
+  }
+  return "";
+}
+
 app.post('/api/chat', async (req, res) => {
   try {
     const { query, history } = req.body;
@@ -100,16 +169,42 @@ app.post('/api/chat', async (req, res) => {
 
     const retriever = vectorStore.asRetriever({ k: 4 });
     const retrievedDocs = await retriever.invoke(query);
-    const contextStr = retrievedDocs.map(d => d.pageContent).join("\n\n");
     
-    const systemPrompt = `You are a document assistant. Answer questions ONLY using the provided document context. 
+    // CRAG: Evaluate Documents
+    const gradedDocs = await evaluateDocuments(query, retrievedDocs);
+    
+    let contextStr = "";
+    let usedFallback = false;
+    let finalChunks = [];
+    
+    if (gradedDocs.length > 0) {
+      contextStr = gradedDocs.map(d => d.pageContent).join("\n\n");
+      finalChunks = gradedDocs.map(d => d.pageContent);
+    } else {
+      // CRAG: Fallback Web Search
+      contextStr = await fallbackSearch(query);
+      if (contextStr) {
+        usedFallback = true;
+        finalChunks = [contextStr];
+      } else {
+        usedFallback = false;
+        contextStr = "No relevant context found in document or web search.";
+      }
+    }
+    
+    let systemPrompt = "";
+    if (usedFallback) {
+       systemPrompt = `You are a helpful assistant. The user's question couldn't be answered by their uploaded documents, so we performed a Wikipedia search. Answer the question using ONLY the provided Wikipedia context. If the answer isn't in the context, say "I couldn't find that in the web search." Be precise and helpful.`;
+    } else {
+       systemPrompt = `You are a document assistant. Answer questions ONLY using the provided document context. 
 If the answer isn't in the context, say "I couldn't find that in the document."
 Be precise, helpful, and concise. Do not use outside knowledge.`;
+    }
 
     const messages = [
       { role: "system", content: systemPrompt },
       ...history,
-      { role: "user", content: `Document context:\n\n${contextStr}\n\n---\nQuestion: ${query}` }
+      { role: "user", content: `Context:\n\n${contextStr}\n\n---\nQuestion: ${query}` }
     ];
 
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -129,7 +224,8 @@ Be precise, helpful, and concise. Do not use outside knowledge.`;
 
     res.json({ 
       answer: data.choices[0].message.content,
-      chunks: retrievedDocs.map(d => d.pageContent) 
+      chunks: finalChunks,
+      usedFallback
     });
 
   } catch (error) {

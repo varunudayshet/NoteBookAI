@@ -4,11 +4,12 @@ NotebookAI is a full-stack, secure RAG (Retrieval-Augmented Generation) applicat
 
 ## ✨ Features
 
-- **Document Ingestion**: Supports PDF, TXT, MD, and CSV files.
+- **Document Ingestion**: Supports PDF, TXT, MD, and CSV files, using robust `pdfjs-dist` parsing.
+- **Corrective RAG (CRAG)**: Includes a document evaluator that grades retrieved chunks. If the chunks are irrelevant, it triggers an automatic **Wikipedia Web Search** fallback.
 - **RAG Pipeline**: Efficiently chunks documents and builds a local vector index using **HNSWLib**.
 - **Smart Embeddings**: Uses high-performance embeddings via **Hugging Face Inference API**.
 - **Secure Architecture**: All AI processing and API keys are managed on a Node.js/Express backend to prevent client-side exposure.
-- **Modern UI**: A sleek, responsive React interface built with Vite, featuring custom assets and smooth transitions.
+- **Modern UI**: A sleek, responsive React interface built with Vite, featuring custom assets, smart fallback badges, and smooth transitions.
 - **Deployment Ready**: Optimized for **Railway** with automatic static file serving and build scripts.
 
 ## 🛠 Tech Stack
